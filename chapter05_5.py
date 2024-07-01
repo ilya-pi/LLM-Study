@@ -1,6 +1,7 @@
 import urllib.request
+from chapter02 import create_dataloader_v1
 from chapter04 import GPTModel
-from chapter05 import GPT_CONFIG_124M, generate, text_to_token_ids, token_ids_to_text
+from chapter05 import GPT_CONFIG_124M, generate, text_to_token_ids, token_ids_to_text, calc_loss_loader
 import torch
 import tiktoken
 
@@ -106,3 +107,43 @@ token_ids = generate(
         temperature=1.5
 )
 print("Output text:\n", token_ids_to_text(token_ids, tokenizer))
+
+# Exercise 5.5 Losses as measured on the verdict
+
+# Load the verdict short story
+file_path = "the-verdict.txt"
+with open(file_path, "r", encoding="utf-8") as file:
+    text_data = file.read()
+
+train_ratio = 0.50
+split_idx = int(train_ratio *len(text_data))
+train_data = text_data[:split_idx]
+val_data = text_data[split_idx:]
+
+torch.manual_seed(123)
+
+train_loader = create_dataloader_v1(
+        train_data,
+        batch_size=2,
+        max_length=NEW_CONFIG["context_length"],
+        stride=NEW_CONFIG["context_length"],
+        drop_last=True,
+        shuffle=True,
+        num_workers=0
+)
+val_loader = create_dataloader_v1(
+        val_data,
+        batch_size=2, # A more common batch size would be 1024, this is just for the demonstration purpose
+        max_length=NEW_CONFIG["context_length"],
+        stride=NEW_CONFIG["context_length"],
+        drop_last=False,
+        shuffle=False,
+        num_workers=0
+)
+
+with torch.no_grad():
+    train_loss = calc_loss_loader(train_loader, gpt, device)
+    val_loss = calc_loss_loader(val_loader, gpt, device)
+
+print("Train lossess:\n", train_loss)
+print("Validation losses:\n", val_loss)
