@@ -94,6 +94,48 @@ class SpamDataset(Dataset):
                 max_length = encoded_length
         return max_length
 
+def calc_accuracy_loader(data_loader, model, device, num_batches=None):
+    model.eval()
+    correct_predictions, num_examples = 0, 0
+
+    if num_batches is None:
+        num_batches = len(data_loader)
+    else:
+        num_batches = min(num_batches, len(data_loader))
+    for i, (input_batch, target_batch) in enumerate(data_loader):
+        if i >= num_batches:
+            break
+        input_batch, target_batch = input_batch.to(device), target_batch.to(device)
+
+        with torch.no_grad():
+            logits = model(input_batch)[:, -1, :]
+        predicted_labels = torch.argmax(logits, dim=-1)
+
+        num_examples += predicted_labels.shape[0]
+        correct_predictions += (predicted_labels == target_batch).sum().item()
+    return correct_predictions / num_examples
+
+def calc_loss_batch(input_batch, target_batch, model, device):
+    input_batch, target_batch = input_batch.to(device), target_batch.to(device)
+    logits = model(input_batch)[:, -1, :] # Logits of last output token
+    loss = torch.nn.functional.cross_entropy(logits, target_batch)
+    return loss
+
+def calc_loss_loader(data_loader, model, device, num_batches=None):
+    total_loss = 0.
+    if len(data_loader) == 0:
+        return float("nan")
+    elif num_batches is None:
+        num_batches = len(data_loader)
+    else:
+        num_batches = min(num_batches, len(data_loader))
+    for i, (input_batch, target_batch) in enumerate(data_loader):
+        if i >= num_batches:
+            break
+        loss = calc_loss_batch(input_batch, target_batch, model, device)
+        total_loss += loss.item()
+    return total_loss / num_batches
+
 
 def main():
     # Downloading file
@@ -228,6 +270,71 @@ def main():
             context_size=BASE_CONFIG["context_length"]
     )
     print(token_ids_to_text(token_ids, tokenizer))
+
+    # 6.5 Onto modifying the pre-trained model
+    # Let's first print the current state
+    print(model)
+
+    # Freeze the model, make the layers non-trainable
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # Replace output head
+    torch.manual_seed(123)
+    num_classes = 2
+    model.out_head = torch.nn.Linear(
+            in_features=BASE_CONFIG["emb_dim"],
+            out_features=num_classes
+    )
+    # Make the last LayerNorm and Transformer block trainable
+    for param in model.trf_blocks[-1].parameters():
+        param.requires_grad = True
+    for param in model.final_norm.parameters():
+        param.requires_grad = True
+
+    # TODO(Ilya): Do exercise 6.2 in finetuning the whole model and assess the impact on predictive performance
+    inputs = tokenizer.encode("Do you have time")
+    inputs = torch.tensor(inputs).unsqueeze(0)
+    print("Inputs:", inputs)
+    print("Inputs dimensions:", inputs.shape) # shape: (batch_size, num_tokens)
+    with torch.no_grad():
+        outputs = model(inputs)
+    print("Outputs:\n", outputs)
+    print("Outputs dimensions:", outputs.shape) # shape: (batch_size, num_tokens, num_classes)
+    print("Last output token:", outputs[:, -1, :])
+
+    # TODO(Ilya): Do exercise 6.3: try finetuning the first output token instead of the last one and observe the changes 
+    # in predictive performance
+
+    # Obtaining the class label for that example
+    logits = outputs[:, -1, :]
+    label = torch.argmax(logits)
+    print("Class label:", label.item())
+
+    # Test out classification accuracies
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    model.to(device)
+
+    torch.manual_seed(123)
+    train_accuracy = calc_accuracy_loader(train_loader, model, device, num_batches=10)
+    val_accuracy = calc_accuracy_loader(val_loader, model, device, num_batches=10)
+    test_accuracy = calc_accuracy_loader(test_loader, model, device, num_batches=10)
+
+    print(f"Training accuracy: {train_accuracy*100:.2f}%")
+    print(f"Validation accuracy: {val_accuracy*100:.2f}%")
+    print(f"Test accuracy: {test_accuracy*100:.2f}%")
+
+    # Computing initial loss for each data set
+    with torch.no_grad():
+        train_loss = calc_loss_loader(train_loader, model, device, num_batches=5)
+        val_loss = calc_loss_loader(val_loader, model, device, num_batches=5)
+        test_loss = calc_loss_loader(test_loader, model, device, num_batches=5)
+    print("The initial loss values are as follows:\n")
+    print(f"Training loss: {train_loss:.3f}")
+    print(f"Validation loss: {val_loss:.3f}")
+    print(f"Test loss: {test_loss:.3f}")
+
+
 
 
 
