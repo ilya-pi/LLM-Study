@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import urllib.request
 import torch
 from torch.utils.data import Dataset
@@ -10,6 +11,15 @@ from gpt_download import download_and_load_gpt2
 from chapter04 import GPTModel
 from chapter05_5 import load_weights_into_gpt
 from chapter05 import generate, text_to_token_ids, token_ids_to_text
+from chapter05 import (
+        calc_loss_loader,
+        train_model_simple,
+        plot_losses,
+        generate_and_print_sample
+)
+from tqdm import tqdm
+import re
+import psutil
 
 def download_and_load_file(file_path, url):
     if not os.path.exists(file_path):
@@ -126,8 +136,6 @@ def custom_collate_fn(
     inputs_tensor = torch.stack(inputs_lst).to(device)
     targets_tensor = torch.stack(targets_lst).to(device)
     return inputs_tensor, targets_tensor
-
-
 
 file_path = "instruction-data.json"
 url = "https://raw.githubusercontent.com/rasbt/LLMs-from-scratch/main/ch07/01_main-chapter-code/instruction-data.json"
@@ -299,3 +307,94 @@ generated_text = token_ids_to_text(token_ids, tokenizer)
 response_text = generated_text[len(input_text):].strip()
 print("\n\n-----OUTPUT-----\n\n")
 print(response_text)
+
+# 7.6
+
+model.to(device)
+torch.manual_seed(123)
+
+with torch.no_grad():
+    train_loss = calc_loss_loader(train_loader, model, device, num_batches=5)
+    val_loss = calc_loss_loader(val_loader, model, device, num_batches=5)
+
+print("Training loss:", train_loss)
+print("Validation loss:", val_loss)
+
+print("Beginning training")
+
+model_file_name = f"{re.sub(r'[ ()]', '', CHOOSE_MODEL) }-sft.pth"
+
+if os.path.exists(model_file_name):
+    model.load_state_dict(torch.load(model_file_name))
+    model.eval()
+else:
+    start_time = time.time()
+    torch.manual_seed(123)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.00005, weight_decay=0.1)
+    num_epochs = 2
+    
+    train_losses, val_losses, tokens_seen = train_model_simple(
+        model, train_loader, val_loader, optimizer, device,
+        num_epochs=num_epochs, eval_freq=5, eval_iter=5,
+        start_context=format_input(val_data[0]), tokenizer=tokenizer
+    )
+    
+    end_time = time.time()
+    execution_time_minutes = (end_time - start_time) / 60
+    print(f"Training completed in {execution_time_minutes:.2f} minutes.")
+    
+    # Plot losses
+    # epochs_tensor = torch.linspace(0, num_epochs, len(train_losses))
+    # plot_losses(epochs_tensor, tokens_seen, train_losses, val_losses)
+
+    print(f"Saving trained model to a file {model_file_name}")
+    torch.save(model.state_dict(), model_file_name)
+
+# Reprinting samples
+# generate_and_print_sample(model, tokenizer, device, format_input(val_data[0]))
+
+# 7.7
+
+torch.manual_seed(123)
+
+for entry in test_data[:3]:
+    input_text = format_input(entry)
+    token_ids = generate(
+            model=model,
+            idx=text_to_token_ids(input_text, tokenizer).to(device),
+            max_new_tokens=256,
+            context_size=BASE_CONFIG["context_length"],
+            eos_id=50256
+    )
+    generated_text = token_ids_to_text(token_ids, tokenizer)
+    response_text = generated_text[len(input_text):].replace("### Response:", "").strip()
+
+    print(input_text)
+    print(f"\nCorrect response:\n>> {entry['output']}")
+    print(f"\nModel response:\n>> {response_text.strip()}")
+    print("---------------------")
+
+for i, entry in tqdm(enumerate(test_data), total=len(test_data)):
+    input_text = format_input(entry)
+
+    token_ids = generate(
+            model=model,
+            idx=text_to_token_ids(input_text, tokenizer).to(device),
+            max_new_tokens=256,
+            context_size=BASE_CONFIG["context_length"],
+            eos_id=50256
+    )
+    generated_text = token_ids_to_text(token_ids, tokenizer)
+    response_text = generated_text[len(input_text):].replace("### Response:", "").strip()
+    test_data[i]["model_response"] = response_text
+
+with open("instruction-data-with-json-response.json", "w") as file:
+    json.dump(test_data, file, indent=4) # "indent" for pretty-printing
+
+print(test_data[0])
+
+ollama_running = check_if_running("ollama")
+
+if not ollama_running:
+    raise RuntimeError("Ollama not running. Launch ollama before proceeding.")
+print("Ollama running:", check_if_running("ollama"))
